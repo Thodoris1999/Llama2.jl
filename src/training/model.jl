@@ -1,5 +1,13 @@
+function dense_or_lora(input::Tensor{T,2}; out_features::Int, name::String, lora::Bool, lora_rank::Int) where {T}
+    if lora
+        lora_dense(input, out_features=out_features, rank=lora_rank, name=name);
+    else
+        dense(input, out_features=out_features, name=name);
+    end
+end
+
 # create a compute graph so that we can later run forward and backward passes over it
-function llama2_graph(x::Tensor; dim::Int, hidden_dim::Int, n_layers::Int, n_heads::Int)
+function llama2_graph(x::Tensor; dim::Int, hidden_dim::Int, n_layers::Int, n_heads::Int, lora::Bool, lora_rank::Int)
     vocab_size, seq_len, batch_size = size(x)
     @assert dim % n_heads == 0
     head_size = dim ÷ n_heads
@@ -13,9 +21,9 @@ function llama2_graph(x::Tensor; dim::Int, hidden_dim::Int, n_layers::Int, n_hea
         # attention rmsnorm
         y = rmsnorm(x; name="layer$(l)_rms_att_weight")
 
-        Q = dense(y; out_features=dim, name="layer$(l)_wq")
-        K = dense(y; out_features=dim, name="layer$(l)_wk")
-        V = dense(y; out_features=dim, name="layer$(l)_wv")
+        Q = dense_or_lora(y; out_features=dim, name="layer$(l)_wq", lora, lora_rank)
+        K = dense_or_lora(y; out_features=dim, name="layer$(l)_wk", lora, lora_rank)
+        V = dense_or_lora(y; out_features=dim, name="layer$(l)_wv", lora, lora_rank)
 
         Q = reshape(Q, head_size, n_heads, seq_len, batch_size)
         K = reshape(K, head_size, n_heads, seq_len, batch_size)
@@ -39,17 +47,17 @@ function llama2_graph(x::Tensor; dim::Int, hidden_dim::Int, n_layers::Int, n_hea
         y = reshape(y, dim, :)
 
         # final matmul to get the output of the attention
-        y = dense(y; out_features=dim, name="layer$(l)_wo")
+        y = dense_or_lora(y; out_features=dim, name="layer$(l)_wo", lora, lora_rank)
 
         # residual connection
         x = x + y
 
         # feed-forward net
         y = rmsnorm(x; name="layer$(l)_rms_ffn_weight")
-        hb1 = dense(y; out_features = hidden_dim, name="layer$(l)_w1")
-        hb2 = dense(y; out_features = hidden_dim, name="layer$(l)_w3")
+        hb1 = dense_or_lora(y; out_features = hidden_dim, name="layer$(l)_w1", lora, lora_rank)
+        hb2 = dense_or_lora(y; out_features = hidden_dim, name="layer$(l)_w3", lora, lora_rank)
         hb = mul(silu(hb1), hb2)
-        y = dense(hb; out_features = dim, name="layer$(l)_w2")
+        y = dense_or_lora(hb; out_features = dim, name="layer$(l)_w2", lora, lora_rank)
 
         # residual connection
         x = x + y
@@ -113,6 +121,8 @@ function train(
         init_weights::Union{TransformerWeights,Nothing} = nothing,
         n_tokens::Int = 10_000_000,
         batch_size::Int = 16,
+        lora::Bool = false,
+        lora_rank::Int = 16,
     )
     (;
         dim,
@@ -126,7 +136,7 @@ function train(
 
     graph = ComputeGraph()
     input = Tensor((vocab_size, seq_len, batch_size), graph)
-    output = llama2_graph(input; dim, hidden_dim, n_layers, n_heads)
+    output = llama2_graph(input; dim, hidden_dim, n_layers, n_heads, lora, lora_rank)
     target = zeros(Float32, vocab_size, seq_len, batch_size)
     loss = kl_divergence(reshape(output, vocab_size, :), reshape(target, vocab_size, :))
 
@@ -175,5 +185,8 @@ function train(
             (:training_loss, @sprintf("%.3f", loss_est))])
     end
 
+    if lora
+        merge_weights!(graph)
+    end
     return extract_weights(graph.parameter_dict, n_layers)
 end

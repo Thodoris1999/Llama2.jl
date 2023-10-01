@@ -67,3 +67,23 @@ function copyto_unflat!(vectors::Vector{<:Vector}, x::Vector)
 
     return nothing
 end
+
+function merge_weights!(graph::ComputeGraph)
+    for op in graph.operations
+        if isa(op, LoraDenseOp)
+            merge!(op)::Nothing
+        end
+    end
+
+    return nothing
+end
+
+function unmerge_weights!(graph::ComputeGraph)
+    for op in graph.operations
+        if isa(op, LoraDenseOp)
+            unmerge!(op)::Nothing
+        end
+    end
+
+    return nothing
+end
